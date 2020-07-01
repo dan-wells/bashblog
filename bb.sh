@@ -5,6 +5,15 @@
 # https://github.com/carlesfe/bashblog/contributors
 # Check out README.md for more details
 
+# debug functions
+#set -eE -o functrace
+#failure() {
+#  local lineno=$1
+#  local msg=$2
+#  echo "Failed at $lineno: $msg"
+#}
+#trap 'failure ${LINENO} "$BASH_COMMAND"' ERR
+
 # Global variables
 # It is recommended to perform a 'rebuild' after changing any of this in the code
 
@@ -58,7 +67,6 @@ global_variables() {
     # Change this to your disqus username to use disqus for comments
     global_disqus_username=""
 
-
     # Blog generated files
     # index page of blog (it is usually good to use "index.html" here)
     index_file="index.html"
@@ -67,6 +75,14 @@ global_variables() {
     archive_index="all_posts.html"
     tags_index="all_tags.html"
 
+    # Directories to put blogpost and tag files in
+    blogpost_dir="posts"
+    tagfile_dir="tags"
+    # prefix for tags/categories files
+    # please make sure that no other html file starts with this prefix
+    prefix_tags="tag_"
+    [ -n "$tagfile_dir" ] && prefix_tags="$tagfile_dir/$prefix_tags"
+
     # Non blogpost files. Bashblog will ignore these. Useful for static pages and custom content
     # Add them as a bash array, e.g. non_blogpost_files=("news.html" "test.html")
     non_blogpost_files=()
@@ -74,24 +90,27 @@ global_variables() {
     # feed file (rss in this case)
     blog_feed="feed.rss"
     number_of_feed_articles="10"
+
     # "cut" blog entry when putting it to index page. Leave blank for full articles in front page
     # i.e. include only up to first '<hr>', or '----' in markdown
     cut_do="cut"
     # When cutting, cut also tags? If "no", tags will appear in index page for cut articles
-    cut_tags="yes"
+    cut_tags="no"
     # Regexp matching the HTML line where to do the cut
     # note that slash is regexp separator so you need to prepend it with backslash
     cut_line='<hr ?\/?>'
+    # Replace cut marker in post body so it doesn't print
+    cut_line_body='<!--hr \/-->'
+
     # save markdown file when posting with "bb post -m". Leave blank to discard it.
     save_markdown="yes"
-    # prefix for tags/categories files
-    # please make sure that no other html file starts with this prefix
-    prefix_tags="tag_"
+
     # personalized header and footer (only if you know what you're doing)
     # DO NOT name them .header.html, .footer.html or they will be overwritten
     # leave blank to generate them, recommended
     header_file=""
     footer_file=""
+
     # extra content to add just after we open the <body> tag
     # and before the actual blog content
     body_begin_file=""
@@ -100,6 +119,7 @@ global_variables() {
     # extra content to ONLY on the index page AFTER `body_begin_file` contents
     # and before the actual content
     body_begin_file_index=""
+
     # CSS files to include on every page, f.ex. css_include=('main.css' 'blog.css')
     # leave empty to use generated
     css_include=()
@@ -261,7 +281,7 @@ disqus_footer() {
 get_html_file_content() {
     awk "/<!-- $1 begin -->/, /<!-- $2 end -->/{
         if (!/<!-- $1 begin -->/ && !/<!-- $2 end -->/) print
-        if (\"$3\" == \"cut\" && /$cut_line/){
+        if (\"$3\" == \"cut\" && /$cut_line|$cut_line_body/){
             if (\"$2\" == \"text\") exit # no need to read further
             while (getline > 0 && !/<!-- text end -->/) {
                 if (\"$cut_tags\" == \"no\" && /^<p>$template_tags_line_header/ ) print 
@@ -450,7 +470,7 @@ create_html_page() {
         # one blog entry
         if [[ $index == no ]]; then
             echo '<!-- entry begin -->' # marks the beginning of the whole post
-            echo "<h3><a class=\"ablack\" href=\"$file_url\">"
+            echo "<h3><a class=\"ablack\" href=\"../$file_url\">"
             # remove possible <p>'s on the title because of markdown conversion
             title=${title//<p>/}
             title=${title//<\/p>/}
@@ -492,6 +512,11 @@ create_html_page() {
         [[ -n $body_end_file ]] && cat "$body_end_file"
         echo '</body></html>'
     } > "$filename"
+
+    # Remove <hr> from posts with cut previews
+    # Have to use (g)awk inplace for compatibility with use of $cut_line elsewhere
+    # (since sed has different escapes from other things...)
+    awk -i inplace "{ gsub(/$cut_line/, \"$cut_line_body\") }; { print }" $filename 2> /dev/null
 }
 
 # Parse the plain text file into an html file
@@ -518,7 +543,7 @@ parse_file() {
                 [[ -n $filename ]] || 
                     filename=$RANDOM # don't allow empty filenames
 
-                filename=$filename.html
+                filename=./$blogpost_dir/$filename.html
 
                 # Check for duplicate file names
                 while [[ -f $filename ]]; do
@@ -533,7 +558,7 @@ parse_file() {
 
             echo -n "<p>$template_tags_line_header " >> "$content"
             for item in "${array[@]}"; do
-                echo -n "<a href='$prefix_tags$item.html'>$item</a>, "
+                echo -n "<a href='../$prefix_tags$item.html'>$item</a>, "
             done | sed 's/, $/<\/p>/g' >> "$content"
         else
             echo "$line" >> "$content"
@@ -611,9 +636,6 @@ EOF
         echo -n "[P]ost this entry, [E]dit again, [D]raft for later? (p/E/d) "
         read -r post_status
         if [[ $post_status == d || $post_status == D ]]; then
-            mkdir -p "drafts/"
-            chmod 700 "drafts/"
-
             title=$(head -n 1 $TMPFILE)
             [[ -n $convert_filename ]] && title=$(echo "$title" | eval "$convert_filename")
             [[ -n $title ]] || title=$RANDOM
@@ -670,7 +692,7 @@ all_posts() {
             # Date
             date=$(LC_ALL=$date_locale date -r "$i" +"$date_format")
             echo " $date</li>"
-        done < <(ls -t ./*.html)
+        done < <(ls -t ./$blogpost_dir/*.html)
         echo "" 1>&3
         echo "</ul>"
         echo "<div id=\"all_posts\"><a href=\"./$index_file\">$template_archive_index_page</a></div>"
@@ -734,18 +756,22 @@ rebuild_index() {
             is_boilerplate_file "$i" && continue;
             if ((n >= number_of_index_articles)); then break; fi
             if [[ -n $cut_do ]]; then
-                get_html_file_content 'entry' 'entry' 'cut' <"$i" | awk "/$cut_line/ { print \"<p class=\\\"readmore\\\"><a href=\\\"$i\\\">$template_read_more</a></p>\" ; next } 1"
+                get_html_file_content 'entry' 'entry' 'cut' <"$i" | awk "/$cut_line|$cut_line_body/ { print \"<p class=\\\"readmore\\\"><a href=\\\"$i\\\">$template_read_more</a></p>\" ; next } 1"
             else
                 get_html_file_content 'entry' 'entry' <"$i"
             fi
             echo -n "." 1>&3
             n=$(( n + 1 ))
-        done < <(ls -t ./*.html) # sort by date, newest first
+        done < <(ls -t ./$blogpost_dir/*.html) # sort by date, newest first
 
         feed=$blog_feed
         if [[ -n $global_feedburner ]]; then feed=$global_feedburner; fi
         echo "<div id=\"all_posts\"><a href=\"$archive_index\">$template_archive</a> &mdash; <a href=\"$tags_index\">$template_tags_title</a> &mdash; <a href=\"$feed\">$template_subscribe</a></div>"
     } 3>&1 >"$contentfile"
+
+    # Fix relative links to blog titles and tag pages
+    sed -i "s|\.\./$blogpost_dir|$blogpost_dir|g" $contentfile
+    sed -i "s|\.\./$prefix_tags|$prefix_tags|g" $contentfile
 
     echo ""
 
@@ -769,7 +795,7 @@ posts_with_tags() {
     (($# < 1)) && return
     set -- "${@/#/$prefix_tags}"
     set -- "${@/%/.html}"
-    sed -n '/^<h3><a class="ablack" href="[^"]*">/{s/.*href="\([^"]*\)">.*/\1/;p;}' "$@" 2> /dev/null
+    sed -n '/^<h3><a class="ablack" href="[^"]*">/{s/.*href="\.\.\/\([^"]*\)">.*/\1/;p;}' "$@" 2> /dev/null
 }
 
 # Rebuilds tag_*.html files
@@ -784,7 +810,7 @@ posts_with_tags() {
 rebuild_tags() {
     if (($# < 2)); then
         # will process all files and tags
-        files=$(ls -t ./*.html)
+        files=$(ls -t ./{$blogpost_dir,$tagfile_dir}/*.html)
         all_tags=yes
     else
         # will process only given files and tags
@@ -795,10 +821,10 @@ rebuild_tags() {
     echo -n "Rebuilding tag pages "
     n=0
     if [[ -n $all_tags ]]; then
-        rm ./"$prefix_tags"*.html &> /dev/null
+        rm "$prefix_tags"*.html &> /dev/null
     else
         for i in $tags; do
-            rm "./$prefix_tags$i.html" &> /dev/null
+            rm "$prefix_tags$i.html" &> /dev/null
         done
     fi
     # First we will process all files and create temporal tag files
@@ -809,7 +835,7 @@ rebuild_tags() {
         is_boilerplate_file "$i" && continue;
         echo -n "."
         if [[ -n $cut_do ]]; then
-            get_html_file_content 'entry' 'entry' 'cut' <"$i" | awk "/$cut_line/ { print \"<p class=\\\"readmore\\\"><a href=\\\"$i\\\">$template_read_more</a></p>\" ; next } 1"
+            get_html_file_content 'entry' 'entry' 'cut' <"$i" | awk "/$cut_line|$cut_line_body/ { print \"<p class=\\\"readmore\\\"><a href=\\\"$i\\\">$template_read_more</a></p>\" ; next } 1"
         else
             get_html_file_content 'entry' 'entry' <"$i"
         fi >"$tmpfile"
@@ -850,7 +876,7 @@ get_post_author() {
 list_tags() {
     if [[ $2 == -n ]]; then do_sort=1; else do_sort=0; fi
 
-    ls ./$prefix_tags*.html &> /dev/null
+    ls $prefix_tags*.html &> /dev/null
     (($? != 0)) && echo "No posts yet. Use 'bb.sh post' to create one" && return
 
     lines=""
@@ -873,7 +899,7 @@ list_tags() {
 
 # Displays a list of the posts
 list_posts() {
-    ls ./*.html &> /dev/null
+    ls ./$blogpost_dir/*.html &> /dev/null
     (($? != 0)) && echo "No posts yet. Use 'bb.sh post' to create one" && return
 
     lines=""
@@ -883,7 +909,7 @@ list_posts() {
         line="$n # $(get_post_title "$i") # $(LC_ALL=$date_locale date -r "$i" +"$date_format")"
         lines+=$line\\n
         n=$(( n + 1 ))
-    done < <(ls -t ./*.html)
+    done < <(ls -t ./$blogpost_dir/*.html)
 
     echo -e "$lines" | column -t -s "#"
 }
@@ -920,7 +946,7 @@ make_rss() {
             echo "<pubDate>$(LC_ALL=C date -r "$i" +"$date_format_full")</pubDate></item>"
     
             n=$(( n + 1 ))
-        done < <(ls -t ./*.html)
+        done < <(ls -t ./$blogpost_dir/*.html)
     
         echo '</channel></rss>'
     } 3>&1 >"$rssfile"
@@ -1019,7 +1045,7 @@ create_css() {
 rebuild_all_entries() {
     echo -n "Rebuilding all entries "
 
-    for i in ./*.html; do
+    for i in ./$blogpost_dir/*.html; do
         is_boilerplate_file "$i" && continue;
         contentfile=.tmp.$RANDOM
         while [[ -f $contentfile ]]; do contentfile=.tmp.$RANDOM; done
@@ -1072,10 +1098,10 @@ usage() {
 
 # Delete all generated content, leaving only this script
 reset() {
-    echo "Are you sure you want to delete all blog entries? Please write \"Yes, I am!\" "
+    echo "Are you sure you want to delete all blog entries? (yes/no) "
     read -r line
-    if [[ $line == "Yes, I am!" ]]; then
-        rm .*.html ./*.html ./*.css ./*.rss &> /dev/null
+    if [[ $line == "yes" ]]; then
+        rm -r $blogpost_dir $tagfile_dir drafts/ .*.html ./*.html ./*.css ./*.rss &> /dev/null
         echo
         echo "Deleted all posts, stylesheets and feeds."
         echo "Kept your old '.backup.tar.gz' just in case, please delete it manually if needed."
@@ -1133,6 +1159,11 @@ do_main() {
     [[ $1 != "reset" && $1 != "post" && $1 != "rebuild" && $1 != "list" && $1 != "edit" && $1 != "delete" && $1 != "tags" ]] && 
         usage && exit
 
+    # Create expected directories
+    mkdir -p $blogpost_dir $tagfile_dir drafts
+    chmod -R 744 $blogpost_dir $tagfile_dir
+    chmod -R 700 drafts
+
     [[ $1 == list ]] &&
         list_posts && exit
 
@@ -1149,7 +1180,7 @@ do_main() {
     # Test for existing html files
     if ls ./*.html &> /dev/null; then
         # We're going to back up just in case
-        tar -c -z -f ".backup.tar.gz" -- *.html &&
+        tar -c -z -f ".backup.tar.gz" -- $blogpost_dir $tagfile_dir drafts/ *.html &&
             chmod 600 ".backup.tar.gz"
     elif [[ $1 == rebuild ]]; then
         echo "Can't find any html files, nothing to rebuild"
